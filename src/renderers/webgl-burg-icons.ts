@@ -8,6 +8,7 @@ import {
 } from "./burg-instances";
 import { registerLayer } from "./layer-host";
 import { type BurgAtlas, buildBurgAtlas } from "./webgl-burg-atlas";
+import { getMapScreenTransform } from "./webgl-map-transform";
 
 const VERT = `#version 300 es
 precision highp float;
@@ -16,18 +17,19 @@ layout(location=1) in vec2 aPos;        // burg map position
 layout(location=2) in float aSize;      // map-unit diameter
 layout(location=3) in float aTile;      // atlas tile index
 layout(location=4) in float aMinZoom;   // cull threshold
-uniform vec2 uTranslate;                // viewX, viewY (screen px)
-uniform float uScale;                   // zoom k
+uniform mat3 uMapToScreen;              // map units to canvas CSS px
+uniform float uMapScale;                // CSS px per map unit
+uniform float uZoomScale;               // logical D3 zoom k
 uniform vec2 uViewport;                 // canvas device px (w,h)
 uniform float uDpr;
 uniform float uCols, uTile;             // atlas layout
 out vec2 vUV;
 out float vCulled;
 void main() {
-  vCulled = uScale < aMinZoom ? 1.0 : 0.0;
+  vCulled = uZoomScale < aMinZoom ? 1.0 : 0.0;
   // a minimum on-screen size keeps tiny icons tappable/visible
-  float sizePx = max(aSize * uScale, 3.0);
-  vec2 centerScreen = aPos * uScale + uTranslate;
+  float sizePx = max(aSize * uMapScale, 3.0);
+  vec2 centerScreen = (uMapToScreen * vec3(aPos, 1.0)).xy;
   vec2 cornerScreen = centerScreen + (aCorner - 0.5) * sizePx;
   vec2 devicePx = cornerScreen * uDpr;
   vec2 clip = (devicePx / uViewport) * 2.0 - 1.0;
@@ -111,7 +113,17 @@ export async function initBurgGL(): Promise<void> {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
     throw new Error(gl.getProgramInfoLog(prog) || "program link failed");
-  for (const u of ["uTranslate", "uScale", "uViewport", "uDpr", "uCols", "uTile", "uAtlas", "uAtlasSize"])
+  for (const u of [
+    "uMapToScreen",
+    "uMapScale",
+    "uZoomScale",
+    "uViewport",
+    "uDpr",
+    "uCols",
+    "uTile",
+    "uAtlas",
+    "uAtlasSize"
+  ])
     uniforms[u] = gl.getUniformLocation(prog, u);
 
   quadBuf = gl.createBuffer()!;
@@ -176,10 +188,8 @@ export function drawBurgGL(): void {
     return;
   }
   const t = (window as any).getMapTransform?.() || { scale: 1, viewX: 0, viewY: 0 };
-  const w = t.scale;
-  const vx = t.viewX;
-  const vy = t.viewY;
   const canvas = gl.canvas as HTMLCanvasElement;
+  const mapToScreen = getMapScreenTransform(canvas);
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
@@ -202,8 +212,9 @@ export function drawBurgGL(): void {
     gl.vertexAttribPointer(loc, sizeN, gl.FLOAT, false, stride, off);
     gl.vertexAttribDivisor(loc, 1);
   }
-  gl.uniform2f(uniforms.uTranslate!, vx, vy);
-  gl.uniform1f(uniforms.uScale!, w);
+  gl.uniformMatrix3fv(uniforms.uMapToScreen!, false, mapToScreen.matrix);
+  gl.uniform1f(uniforms.uMapScale!, mapToScreen.scale);
+  gl.uniform1f(uniforms.uZoomScale!, t.scale);
   gl.uniform2f(uniforms.uViewport!, canvas.width, canvas.height);
   gl.uniform1f(uniforms.uDpr!, window.devicePixelRatio || 1);
   gl.uniform1f(uniforms.uCols!, atlas.cols);

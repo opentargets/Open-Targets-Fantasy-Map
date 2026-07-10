@@ -2,9 +2,10 @@ import { type Quadtree, quadtree } from "d3-quadtree";
 import type { Burg } from "../generators/burgs-generator";
 import { GLYPH_STRIDE, packGlyphQuads } from "./label-instances";
 import { type FontGeometry, type GlyphMetric, layoutLabel } from "./label-layout";
-import { type LabelBox, type MapViewport, selectVisibleLabels } from "./label-visibility";
+import { type LabelBox, selectVisibleLabels } from "./label-visibility";
 import { registerLayer } from "./layer-host";
 import { buildGlyphAtlas, collectGlyphs, type GlyphAtlas } from "./sdf-glyph-atlas";
+import { getMapScreenTransform, mapViewportFromScreen } from "./webgl-map-transform";
 
 export interface LabelGroupStyle {
   order: number;
@@ -54,14 +55,13 @@ precision highp float;
 layout(location=0) in vec2 aCorner;     // unit quad 0..1
 layout(location=1) in vec4 aQuad;       // x,y (map) , w,h (map)
 layout(location=2) in vec4 aUV;         // u0,v0,u1,v1 (atlas px)
-uniform vec2 uTranslate;
-uniform float uScale;
+uniform mat3 uMapToScreen;
 uniform vec2 uViewport;
 uniform float uDpr;
 out vec2 vUV;
 void main() {
   vec2 mapPos = aQuad.xy + aCorner * aQuad.zw;
-  vec2 screen = mapPos * uScale + uTranslate;
+  vec2 screen = (uMapToScreen * vec3(mapPos, 1.0)).xy;
   vec2 device = screen * uDpr;
   vec2 clip = (device / uViewport) * 2.0 - 1.0;
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
@@ -113,7 +113,12 @@ export function hexToRgb(color: string): [number, number, number] {
   const six = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c);
   if (six) return [parseInt(six[1], 16) / 255, parseInt(six[2], 16) / 255, parseInt(six[3], 16) / 255];
   const three = /^#?([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(c);
-  if (three) return [parseInt(three[1] + three[1], 16) / 255, parseInt(three[2] + three[2], 16) / 255, parseInt(three[3] + three[3], 16) / 255];
+  if (three)
+    return [
+      parseInt(three[1] + three[1], 16) / 255,
+      parseInt(three[2] + three[2], 16) / 255,
+      parseInt(three[3] + three[3], 16) / 255
+    ];
   const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(c);
   if (rgb) return [+rgb[1] / 255, +rgb[2] / 255, +rgb[3] / 255];
   return [0, 0, 0];
@@ -126,8 +131,19 @@ export function hexToRgb(color: string): [number, number, number] {
  */
 function readGroupStyles(): Record<string, LabelGroupStyle> {
   const MIN_ZOOM: Record<string, number> = {
-    capital: 1, "skyburg-capital": 2, skyburg: 4, "skyburg-mid": 6, "skyburg-small": 8,
-    city: 4, town: 6, fort: 7, monastery: 7, caravanserai: 7, trading_post: 7, village: 10, hamlet: 14
+    capital: 1,
+    "skyburg-capital": 2,
+    skyburg: 4,
+    "skyburg-mid": 6,
+    "skyburg-small": 8,
+    city: 4,
+    town: 6,
+    fort: 7,
+    monastery: 7,
+    caravanserai: 7,
+    trading_post: 7,
+    village: 10,
+    hamlet: 14
   };
   const out: Record<string, LabelGroupStyle> = {};
   const shells = Array.from(document.querySelectorAll<SVGGElement>("#burgLabels > g"));
@@ -159,7 +175,7 @@ export async function initBurgLabelGL(): Promise<void> {
   gl.attachShader(prog, compile(FRAG, gl.FRAGMENT_SHADER));
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link failed");
-  for (const u of ["uTranslate", "uScale", "uViewport", "uDpr", "uAtlas", "uAtlasSize", "uFill", "uHalo", "uHaloEdge"])
+  for (const u of ["uMapToScreen", "uViewport", "uDpr", "uAtlas", "uAtlasSize", "uFill", "uHalo", "uHaloEdge"])
     uniforms[u] = gl.getUniformLocation(prog, u);
   quadBuf = gl.createBuffer()!;
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
@@ -225,18 +241,16 @@ export function scheduleRebuildBurgLabelGL(): void {
   }, 50);
 }
 
-function currentViewport(canvas: HTMLCanvasElement, scale: number, vx: number, vy: number): MapViewport {
-  const dpr = window.devicePixelRatio || 1;
-  const wPx = canvas.width / dpr;
-  const hPx = canvas.height / dpr;
-  return { x0: (0 - vx) / scale, y0: (0 - vy) / scale, x1: (wPx - vx) / scale, y1: (hPx - vy) / scale };
-}
-
 export function drawBurgLabelGL(): void {
   if (!gl || !atlas) return;
   const t = (window as any).getMapTransform?.() || { scale: 1, viewX: 0, viewY: 0 };
   const canvas = gl.canvas as HTMLCanvasElement;
-  const vp = currentViewport(canvas, t.scale, t.viewX, t.viewY);
+  const mapToScreen = getMapScreenTransform(canvas);
+  const vp = mapViewportFromScreen(
+    canvas.width / (window.devicePixelRatio || 1),
+    canvas.height / (window.devicePixelRatio || 1),
+    mapToScreen
+  );
   const key = `${t.scale.toFixed(4)}|${vp.x0.toFixed(1)}|${vp.y0.toFixed(1)}`;
 
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -273,8 +287,7 @@ export function drawBurgLabelGL(): void {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-  gl.uniform2f(uniforms.uTranslate!, t.viewX, t.viewY);
-  gl.uniform1f(uniforms.uScale!, t.scale);
+  gl.uniformMatrix3fv(uniforms.uMapToScreen!, false, mapToScreen.matrix);
   gl.uniform2f(uniforms.uViewport!, canvas.width, canvas.height);
   gl.uniform1f(uniforms.uDpr!, window.devicePixelRatio || 1);
   gl.uniform2f(uniforms.uAtlasSize!, atlas.canvas.width, atlas.canvas.height);
@@ -352,7 +365,12 @@ registerLayer({
     const found = qt.find(mapX, mapY);
     if (!found) return null;
     // accept the hit when inside the label's box
-    if (mapX >= found.x - found.halfW && mapX <= found.x + found.halfW && mapY >= found.y - found.halfH && mapY <= found.y + found.halfH)
+    if (
+      mapX >= found.x - found.halfW &&
+      mapX <= found.x + found.halfW &&
+      mapY >= found.y - found.halfH &&
+      mapY <= found.y + found.halfH
+    )
       return found.id;
     return null;
   }
