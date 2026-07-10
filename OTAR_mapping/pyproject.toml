@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ot-fmg"
+version = "0.1.0"
+description = "Convert Open Targets-style disease data into Azgaar Fantasy Map Generator .map files"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+layout = [
+  "numpy>=1.26",
+  "scikit-learn>=1.4",
+  "umap-learn>=0.5",
+]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+ot-fmg = "ot_fmg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
